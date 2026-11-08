@@ -49,7 +49,20 @@
 
 ## 設計（Day4 以降に追記していく）
 
-- 仕様: `docs/spec/`
-- 画面一覧: `docs/design/screens.md`
-- データベース設計: `docs/design/database.md`
-- 用語: {{ 生産者、購入者、商品、カート、注文、注文明細 などの定義 }}
+- 要件とユーザーストーリー: `docs/spec/01_requirements.md`
+- 画面一覧: `docs/design/screens.md`（S1〜S14 と、POST だけの URL）
+- データベース設計: `docs/design/database.md`（4テーブル、削除時の動き）
+- 参考解答: `docs/spec/02_screens.md`、`03_database.md`。決済・テスト・初期データは `04_flows_tests_seed.md`
+- `docs/design/` と `docs/spec/` が食い違うときは、`docs/design/` を正とする（例: S14 管理者の注文一覧はコアに入れた）
+
+### 用語
+
+- 購入者（customer）: 商品を買う会員。会員登録の初期値
+- 生産者（producer）: 商品を出品する会員。購入者としても買える
+- 管理者（admin）: 全ての商品（非公開も）と注文を見られる。全商品の一覧画面は拡張 E15、注文一覧（S14）はコア。`flask create-admin` でだけ作る
+- 商品（products）: 生産者が出品するもの。公開 / 非公開（`is_published`）を持つ
+- カート: セッションに `{商品ID: 数量}` で持つ。DB には保存しない
+- 注文（orders）: 状態は 支払い待ち（pending）→ 支払い済み（paid）/ 取り消し（cancelled）
+- 注文明細（order_items）: 注文時点の商品名と単価を保存する
+- 在庫（stock）: 生産者が入力した、いまある数。支払いが確定したときに減らす
+- いま買える数: 在庫 − 支払い待ち（作成から35分以内）の数量
