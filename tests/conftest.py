@@ -8,8 +8,41 @@ from marche.models import Product, Role, User
 # 決済の章（と AI の拡張）で、ここにフェイク（偽物）のクラスを足し、create_app() の設定で差し替える。
 
 
+class FakePayment:
+    """本物の Stripe の代わり。テストのときだけ create_app() に差し替えて渡す"""
+
+    def __init__(self):
+        self.created = []  # create_checkout_session が呼ばれた注文の ID
+        self.expired = []  # expire_session が呼ばれた session_id
+        self.sessions = {}  # session_id -> retrieve_session で返す dict
+        self.error = None  # 入れておくと、どの呼び出しでもその例外を投げる
+        self.expire_error = None  # 入れておくと、expire_session だけが投げる
+
+    def create_checkout_session(self, order):
+        if self.error:
+            raise self.error
+        session_id = f"cs_test_fake_{order.id}"
+        self.created.append(order.id)
+        return session_id, f"https://checkout.stripe.test/{session_id}"
+
+    def retrieve_session(self, session_id):
+        if self.error:
+            raise self.error
+        return self.sessions[session_id]
+
+    def expire_session(self, session_id):
+        if self.error or self.expire_error:
+            raise self.error or self.expire_error
+        self.expired.append(session_id)
+
+
 @pytest.fixture
-def app(tmp_path):
+def fake_payment():
+    return FakePayment()
+
+
+@pytest.fixture
+def app(fake_payment, tmp_path):
     app = create_app(
         {
             "TESTING": True,
@@ -17,6 +50,8 @@ def app(tmp_path):
             "WTF_CSRF_ENABLED": False,
             # テストの写真は一時フォルダーへ（marche/static/uploads に溜めない）
             "UPLOAD_FOLDER": str(tmp_path / "uploads"),
+            # 本物の Stripe は呼ばない
+            "PAYMENT_SERVICE": fake_payment,
         }
     )
     with app.app_context():

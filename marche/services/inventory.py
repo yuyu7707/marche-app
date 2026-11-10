@@ -1,6 +1,6 @@
 from datetime import timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from marche.extensions import db
 from marche.models import Order, OrderItem, OrderStatus, Product, now_jst
@@ -80,3 +80,19 @@ def create_order(user, cart: dict[int, int]) -> Order:
     db.session.add(order)
     db.session.commit()
     return order
+
+
+def cancel(order: Order) -> bool:
+    """支払い待ち（pending）の注文だけを取り消しにする。取り消せたら True。
+
+    「読んで、pending なら書く」の2段階にせず、1つの UPDATE 文で条件ごと更新する。
+    支払い済みや取り消し済みの注文は変えない（False を返す）。
+    """
+    result = db.session.execute(
+        update(Order)
+        .where(Order.id == order.id, Order.status == OrderStatus.PENDING)
+        .values(status=OrderStatus.CANCELLED)
+    )
+    db.session.commit()
+    db.session.refresh(order)
+    return result.rowcount == 1

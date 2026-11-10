@@ -5,6 +5,7 @@ from pathlib import Path
 from flask import Flask, render_template
 
 from marche.extensions import csrf, db, login_manager, migrate
+from marche.services import payment
 
 
 def create_app(config=None):
@@ -18,6 +19,10 @@ def create_app(config=None):
         MAX_CONTENT_LENGTH=6 * 1024 * 1024,
         UPLOAD_FOLDER=str(Path(app.root_path) / "static" / "uploads"),
         SESSION_COOKIE_SECURE=os.environ.get("SESSION_COOKIE_SECURE") == "1",
+        STRIPE_SECRET_KEY=os.environ.get("STRIPE_SECRET_KEY", ""),
+        STRIPE_WEBHOOK_SECRET=os.environ.get("STRIPE_WEBHOOK_SECRET", ""),
+        # テストでは FakePayment を渡す。None なら本物の payment モジュールを使う
+        PAYMENT_SERVICE=None,
     )
     if config is not None:
         app.config.update(config)
@@ -33,6 +38,9 @@ def create_app(config=None):
     login_manager.init_app(app)
     login_manager.login_view = "auth.login"
     login_manager.login_message = "ログインしてください"
+
+    # 外部サービスはここで差し替えられるようにする（テストではフェイクを渡す）
+    app.extensions["payment"] = app.config["PAYMENT_SERVICE"] or payment
 
     from marche.views import auth, cart, orders, producer, shop
 
