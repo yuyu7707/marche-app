@@ -1,5 +1,6 @@
 import logging
 import os
+from pathlib import Path
 
 from flask import Flask, render_template
 
@@ -13,6 +14,9 @@ def create_app(config=None):
         SQLALCHEMY_DATABASE_URI=os.environ.get(
             "DATABASE_URL", "sqlite:///marche.sqlite"
         ),
+        # 写真は 5MB まで（フォームで確かめる）。リクエスト全体は 6MB を超えたら 413 で断る
+        MAX_CONTENT_LENGTH=6 * 1024 * 1024,
+        UPLOAD_FOLDER=str(Path(app.root_path) / "static" / "uploads"),
         SESSION_COOKIE_SECURE=os.environ.get("SESSION_COOKIE_SECURE") == "1",
     )
     if config is not None:
@@ -30,9 +34,9 @@ def create_app(config=None):
     login_manager.login_view = "auth.login"
     login_manager.login_message = "ログインしてください"
 
-    from marche.views import auth, producer, shop
+    from marche.views import auth, cart, orders, producer, shop
 
-    for module in (auth, shop, producer):
+    for module in (auth, shop, producer, cart, orders):
         app.register_blueprint(module.bp)
 
     from marche import commands
@@ -50,6 +54,10 @@ def create_app(config=None):
     @app.errorhandler(404)
     def not_found(error):
         return render_template("errors/404.html"), 404
+
+    @app.errorhandler(413)
+    def too_large(error):
+        return render_template("errors/413.html"), 413
 
     logging.basicConfig(level=logging.INFO)
     return app
