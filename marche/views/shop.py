@@ -3,7 +3,7 @@ from flask_login import current_user
 
 from marche.extensions import db
 from marche.models import Product
-from marche.services.inventory import available_stock
+from marche.services.inventory import MAX_QUANTITY, available_stock
 
 bp = Blueprint("shop", __name__)
 
@@ -35,5 +35,8 @@ def show(product_id: int):
     if not can_view(product):
         abort(404)  # 非公開の商品は「存在しない」と同じ扱いにする
     return render_template(
-        "shop/show.html", product=product, available=available_stock(product)
+        "shop/show.html",
+        product=product,
+        available=available_stock(product),
+        max_quantity=MAX_QUANTITY,
     )
