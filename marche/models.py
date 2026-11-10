@@ -26,6 +26,19 @@ class Role(StrEnum):
 ROLE_LABELS = {Role.CUSTOMER: "購入者", Role.PRODUCER: "生産者", Role.ADMIN: "管理者"}
 
 
+class OrderStatus(StrEnum):
+    PENDING = "pending"
+    PAID = "paid"
+    CANCELLED = "cancelled"
+
+
+ORDER_STATUS_LABELS = {
+    OrderStatus.PENDING: "支払い待ち",
+    OrderStatus.PAID: "支払い済み",
+    OrderStatus.CANCELLED: "取り消し",
+}
+
+
 class User(UserMixin, db.Model):
     __tablename__ = "users"
 
@@ -37,6 +50,7 @@ class User(UserMixin, db.Model):
     created_at: Mapped[datetime] = mapped_column(default=now_jst)
 
     products: Mapped[list[Product]] = relationship(back_populates="producer")
+    orders: Mapped[list[Order]] = relationship(back_populates="user")
 
     def set_password(self, password: str) -> None:
         self.password_hash = generate_password_hash(password)
@@ -73,3 +87,45 @@ class Product(db.Model):
     updated_at: Mapped[datetime] = mapped_column(default=now_jst, onupdate=now_jst)
 
     producer: Mapped[User] = relationship(back_populates="products")
+    order_items: Mapped[list[OrderItem]] = relationship(back_populates="product")
+
+
+class Order(db.Model):
+    __tablename__ = "orders"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    status: Mapped[str] = mapped_column(String(20), default=OrderStatus.PENDING)
+    # 合計金額（円）。明細の小計の合計を、サーバーで計算して入れる
+    total_amount: Mapped[int]
+    stripe_checkout_session_id: Mapped[str | None] = mapped_column(
+        String(255), unique=True
+    )
+    stripe_payment_intent_id: Mapped[str | None] = mapped_column(String(255))
+    paid_at: Mapped[datetime | None]
+    created_at: Mapped[datetime] = mapped_column(default=now_jst)
+
+    user: Mapped[User] = relationship(back_populates="orders")
+    items: Mapped[list[OrderItem]] = relationship(
+        back_populates="order", cascade="all, delete-orphan"
+    )
+
+    @property
+    def status_label(self) -> str:
+        return ORDER_STATUS_LABELS[OrderStatus(self.status)]
+
+
+class OrderItem(db.Model):
+    __tablename__ = "order_items"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"), index=True)
+    product_id: Mapped[int] = mapped_column(ForeignKey("products.id"), index=True)
+    # 注文した時点の商品名と単価を保存する（あとで変わっても、注文の記録は変わらない）
+    product_name: Mapped[str] = mapped_column(String(50))
+    unit_price: Mapped[int]
+    quantity: Mapped[int]
+    subtotal: Mapped[int]
+
+    order: Mapped[Order] = relationship(back_populates="items")
+    product: Mapped[Product] = relationship(back_populates="order_items")

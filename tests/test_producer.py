@@ -2,7 +2,7 @@ import io
 from pathlib import Path
 
 from marche.extensions import db
-from marche.models import Product
+from marche.models import Order, OrderItem, Product
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 20
 
@@ -70,6 +70,29 @@ def test_他の生産者の商品は削除できない(
     login(producer)
     response = client.post(f"/producer/products/{product.id}/delete")
     assert response.status_code == 403
+    assert db.session.get(Product, product.id) is not None
+
+
+def test_注文がある商品は削除できない(client, producer, customer, make_product, login):
+    product = make_product()
+    order = Order(user=customer, total_amount=200)
+    db.session.add(order)
+    order.items.append(
+        OrderItem(
+            product=product,
+            product_name=product.name,
+            unit_price=200,
+            quantity=1,
+            subtotal=200,
+        )
+    )
+    db.session.commit()
+    login(producer)
+    response = client.post(
+        f"/producer/products/{product.id}/delete", follow_redirects=True
+    )
+    assert response.status_code == 200
+    assert "注文がある商品は削除できません" in response.text
     assert db.session.get(Product, product.id) is not None
 
 
