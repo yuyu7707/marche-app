@@ -3,7 +3,13 @@ from sqlalchemy import func, select
 
 from marche.extensions import db
 from marche.models import Order, OrderItem, OrderStatus
-from marche.services.inventory import MAX_QUANTITY, OrderError, create_order
+from marche.services.inventory import (
+    MAX_QUANTITY,
+    OrderError,
+    available_stock,
+    create_order,
+)
+from marche.services.payment import PaymentError
 
 
 def count(model):
@@ -122,21 +128,25 @@ def get_cart_session(client):
         return sess.get("cart")
 
 
-def test_カートに入れて注文すると合計はDBの価格で計算される(
-    client, customer, make_product, login
+def test_カートに入れて注文するとStripeへ移動し合計はDBの価格で計算される(
+    client, customer, make_product, login, fake_payment
 ):
     product = make_product(price=300, stock=10)
     login(customer)
     client.post(f"/cart/add/{product.id}", data={"quantity": 2})
     assert get_cart_session(client) == {str(product.id): 2}
 
+    # フォームに金額を混ぜて送っても無視される
     response = client.post("/orders/", data={"total_amount": 1})
 
     order = db.session.scalars(select(Order)).one()
-    assert response.status_code == 302
-    assert response.headers["Location"].endswith(f"/orders/{order.id}")
+    assert response.status_code == 303
+    assert response.headers["Location"].startswith("https://checkout.stripe.test/")
     assert order.total_amount == 600
     assert order.user_id == customer.id
+    assert order.status == OrderStatus.PENDING
+    assert order.stripe_checkout_session_id == f"cs_test_fake_{order.id}"
+    assert fake_payment.created == [order.id]
     assert not get_cart_session(client)
 
 
@@ -198,6 +208,21 @@ def test_ログイン済みのカートには注文ボタンが出る(
 
     assert "注文して支払いへ進む" in text
     assert "ログインして注文する" not in text
+
+
+def test_注文ボタンは押したら無効になり二重送信を防ぐ(
+    client, customer, make_product, login
+):
+    product = make_product()
+    login(customer)
+    client.post(f"/cart/add/{product.id}", data={"quantity": 1})
+
+    text = client.get("/cart/").text
+
+    # 押した直後にボタンを無効にする処理が、注文のフォームに付いている
+    # （書き方そのものではなく、注文のフォームと無効化の処理があることだけを確かめる）
+    assert 'action="/orders/"' in text
+    assert "disabled" in text
 
 
 def test_カートに入れた商品が一覧に出る(client, make_product):
@@ -420,7 +445,7 @@ def test_非公開の商品が混ざっても外されて注文できる(
 
     # そのまま注文できる
     response = client.post("/orders/")
-    assert response.status_code == 302
+    assert response.status_code == 303
     order = db.session.scalar(select(Order))
     assert order.total_amount == 300
 
@@ -445,3 +470,209 @@ def test_カートのセッションが辞書でなくても500にならない(c
         sess["cart"] = [1, 2]
 
     assert client.get("/cart/").status_code == 200
+
+
+# --- Stripe（フェイク）との連携 ---
+
+
+def place_order(client, customer, make_product, login, **kwargs):
+    """カートに入れて注文し、作られた注文を返す"""
+    product = make_product(**kwargs)
+    login(customer)
+    client.post(f"/cart/add/{product.id}", data={"quantity": 2})
+    client.post("/orders/")
+    return db.session.scalars(select(Order)).one()
+
+
+def test_決済ページを作れなければ注文を取り消してカートへ戻す(
+    client, customer, make_product, login, fake_payment
+):
+    fake_payment.error = PaymentError("決済ページを開けませんでした。")
+    product = make_product(stock=5)
+    login(customer)
+    client.post(f"/cart/add/{product.id}", data={"quantity": 2})
+
+    response = client.post("/orders/")
+
+    assert response.status_code == 302
+    assert response.headers["Location"].endswith("/cart/")
+    order = db.session.scalars(select(Order)).one()
+    assert order.status == OrderStatus.CANCELLED
+    assert order.stripe_checkout_session_id is None
+    # カートは残る。在庫の押さえも解けている
+    assert get_cart_session(client) == {str(product.id): 2}
+    assert available_stock(product) == 5
+    assert "決済ページを開けませんでした" in client.get("/cart/").text
+
+
+def test_在庫不足の注文ではStripeを呼ばない(
+    client, customer, make_product, login, fake_payment
+):
+    product = make_product(stock=1)
+    login(customer)
+    set_cart(client, {str(product.id): 3})
+
+    client.post("/orders/")
+
+    assert fake_payment.created == []
+    assert count(Order) == 0
+
+
+def test_中断ページは本人が開ける(client, customer, make_product, login):
+    order = place_order(client, customer, make_product, login)
+
+    response = client.get(f"/orders/{order.id}/cancel")
+
+    assert response.status_code == 200
+    assert "この注文を取り消す" in response.text
+
+
+def test_中断ページは他人と未ログインは開けない(
+    client, customer, make_product, login, other_producer
+):
+    order = place_order(client, customer, make_product, login)
+    client.post("/logout")
+    assert "/login" in client.get(f"/orders/{order.id}/cancel").headers["Location"]
+    assert client.post(f"/orders/{order.id}/cancel").status_code == 302
+
+    login(other_producer)
+    assert client.get(f"/orders/{order.id}/cancel").status_code == 403
+    assert client.post(f"/orders/{order.id}/cancel").status_code == 403
+    db.session.refresh(order)
+    assert order.status == OrderStatus.PENDING
+
+
+def test_管理者は中断ページを開ける(client, customer, make_product, login, admin):
+    order = place_order(client, customer, make_product, login)
+    client.post("/logout")
+    login(admin)
+
+    assert client.get(f"/orders/{order.id}/cancel").status_code == 200
+
+
+def test_中断ページで取り消すとSessionを期限切れにして注文を取り消す(
+    client, customer, make_product, login, fake_payment
+):
+    product_stock = 5
+    order = place_order(client, customer, make_product, login, stock=product_stock)
+    product = order.items[0].product
+    assert available_stock(product) == product_stock - 2
+
+    response = client.post(f"/orders/{order.id}/cancel", follow_redirects=True)
+
+    assert "注文を取り消しました" in response.text
+    db.session.refresh(order)
+    assert order.status == OrderStatus.CANCELLED
+    assert fake_payment.expired == [order.stripe_checkout_session_id]
+    # 在庫が元に戻る
+    assert available_stock(product) == product_stock
+
+
+def test_Sessionを期限切れにできなければ取り消さない(
+    client, customer, make_product, login, fake_payment
+):
+    order = place_order(client, customer, make_product, login)
+    fake_payment.error = PaymentError("決済ページを閉じられませんでした。")
+
+    response = client.post(f"/orders/{order.id}/cancel", follow_redirects=True)
+
+    assert "決済ページを閉じられませんでした" in response.text
+    db.session.refresh(order)
+    assert order.status == OrderStatus.PENDING
+
+
+def test_支払い済みの注文は中断ページから取り消せない(
+    client, customer, make_product, login, fake_payment
+):
+    order = place_order(client, customer, make_product, login)
+    order.status = OrderStatus.PAID
+    db.session.commit()
+
+    response = client.post(f"/orders/{order.id}/cancel", follow_redirects=True)
+
+    assert "この注文は取り消せません" in response.text
+    db.session.refresh(order)
+    assert order.status == OrderStatus.PAID
+    assert fake_payment.expired == []
+
+
+def test_存在しない注文の中断ページは404(client, customer, login):
+    login(customer)
+    assert client.get("/orders/9999/cancel").status_code == 404
+
+
+def test_完了ページは確認中と出る(client, customer, make_product, login):
+    order = place_order(client, customer, make_product, login)
+
+    response = client.get(f"/orders/{order.id}/complete?session_id=cs_test_x")
+
+    assert response.status_code == 200
+    assert "お支払いを確認しています" in response.text
+
+
+def test_完了ページは他人と未ログインは開けない(
+    client, customer, make_product, login, other_producer
+):
+    order = place_order(client, customer, make_product, login)
+    client.post("/logout")
+    assert "/login" in client.get(f"/orders/{order.id}/complete").headers["Location"]
+
+    login(other_producer)
+    assert client.get(f"/orders/{order.id}/complete").status_code == 403
+
+
+def test_期限切れで閉じられなくても取り消せる(
+    client, customer, make_product, login, fake_payment
+):
+    order = place_order(client, customer, make_product, login)
+    sid = order.stripe_checkout_session_id
+    # 31分以上たって、決済ページはすでに期限切れ。expire は失敗するが、状態は expired
+    fake_payment.expire_error = PaymentError("決済ページを閉じられませんでした。")
+    fake_payment.sessions[sid] = {"id": sid, "status": "expired"}
+
+    response = client.post(f"/orders/{order.id}/cancel", follow_redirects=True)
+
+    assert "注文を取り消しました" in response.text
+    db.session.refresh(order)
+    assert order.status == OrderStatus.CANCELLED
+
+
+def test_閉じられず支払い済みのSessionなら取り消さない(
+    client, customer, make_product, login, fake_payment
+):
+    order = place_order(client, customer, make_product, login)
+    sid = order.stripe_checkout_session_id
+    fake_payment.expire_error = PaymentError("決済ページを閉じられませんでした。")
+    fake_payment.sessions[sid] = {"id": sid, "status": "complete"}
+
+    response = client.post(f"/orders/{order.id}/cancel", follow_redirects=True)
+
+    assert "支払いが済んでいる可能性があります" in response.text
+    db.session.refresh(order)
+    assert order.status == OrderStatus.PENDING
+
+
+def test_中断ページは支払い済みなら未払いとは出さない(
+    client, customer, make_product, login
+):
+    order = place_order(client, customer, make_product, login)
+    order.status = OrderStatus.PAID
+    db.session.commit()
+
+    text = client.get(f"/orders/{order.id}/cancel").text
+
+    assert "まだ支払われていません" not in text
+    assert "支払い済み" in text
+
+
+def test_存在しない注文の完了ページは404(client, customer, login):
+    login(customer)
+    assert client.get("/orders/9999/complete").status_code == 404
+
+
+def test_管理者は完了ページを開ける(client, customer, make_product, login, admin):
+    order = place_order(client, customer, make_product, login)
+    client.post("/logout")
+    login(admin)
+
+    assert client.get(f"/orders/{order.id}/complete").status_code == 200

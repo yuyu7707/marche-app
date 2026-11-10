@@ -30,7 +30,8 @@
 <p><small>数量を 0 にして「変更」を押すと、カートから外れます。</small></p>
 {% if current_user.is_authenticated %}
 {# 送るのは CSRF トークンだけ。金額はサーバーが DB から計算する #}
-<form method="post" action="{{ url_for('orders.create') }}">
+{# 押したらすぐボタンを無効にする（ダブルクリックで2回送られて、決済ページが見えなくなるのを防ぐ） #}
+<form method="post" action="{{ url_for('orders.create') }}" onsubmit="this.querySelector('button').disabled = true">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
   <button type="submit">注文して支払いへ進む</button>
 </form>
