@@ -33,4 +33,3 @@ jobs:
 
       - name: Test (pytest)
         run: uv run pytest -q
-.github/workflows/
